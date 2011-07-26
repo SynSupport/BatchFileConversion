@@ -1,0 +1,271 @@
+;;***********************************************************************************
+;;
+;; Title:       dblink2link.dbl
+;;
+;; Type:        Program
+;;
+;; Description:
+;;
+;; Author:      William Hawkins, Synergex Professional Services Group
+;;
+;; Copyright    © 2010 Synergex International Corporation.  All rights reserved.
+;;
+;; WARNING:     All content constituting or related to this code ("Code") is the
+;;              property of Synergex International Corporation ("Synergex") and
+;;              is protected by U.S. and international copyright laws.
+;;              If you were given this Code by a Synergex employee then you may
+;;              use and modify it freely for use within your applications.
+;;
+;;              However, you may use the Code only for your personal use.
+;;              Any other use, unless otherwise authorized in writing by
+;;              Synergex is strictly prohibited.  You may not under any
+;;              circumstances distribute this Code, or any modified version
+;;              or part of this Code, to any third party without first
+;;              obtaining written permission to do so from Synergex.
+;;              In using this Code you accept that it is provided as is,
+;;              and without support or warranty of any kind.
+;;
+;;              Neither Synergex nor the author accept any responsibility
+;;              for any losses or damages of any nature which may arise
+;;              from the use of this Code.  This header information must
+;;              remain unaltered in the Code at all times.  Possession
+;;              of this Code, or any modified version or part of this Code,
+;;              indicates your acceptance of these terms.
+;;
+;;***********************************************************************************
+;; convert Synergy linker command line to LINK equivalent command line
+
+import System.Collections
+import SynPSG.Core.Utilities
+
+namespace SynPSG.Core.Utilities
+
+    function dblink2link  ,a
+        req in  dblCommand  ,a
+        endparams
+
+        record
+            dibolCommand    ,a1000
+            dblLength       ,int
+            dblPos          ,int
+            delim           ,a1
+            paramArray      ,@System.Collections.ArrayList
+            token           ,string
+        endrecord
+    proc
+
+        if(%option(34)) then
+            delim = '/'
+        else
+            delim = '-'
+
+        paramArray = new System.Collections.ArrayList()
+
+        dblLength = %trim(dblCommand)
+        dblPos = 5
+
+        dibolCommand = 'LINK'
+
+        call skipSpaces
+
+        while(dblPos < dblLength)
+        begin
+            using dblCommand(dblPos:1) select
+            (delim),
+            begin
+                ;;spit out any unprocessed options.  This may cause compile errors
+                while(paramArray.Count > 0)
+                begin
+                    token = (string)paramArray[0]
+                    dibolCommand = dibolCommand(1:%trim(dibolCommand)) + token
+                    call pop_paramArray
+                end
+                call processOption
+            end
+            (' '),
+            begin
+                call skipSpaces
+                if(dblCommand(dblPos:1) != delim)
+                    call processNextToken
+            end
+            (),
+                dblPos += 1
+            endusing
+        end
+
+        ;; remove excess spaces
+        dblPos = %instr(1, dibolCommand, '  ')
+        while(dblPos > 0 && dblPos < %trim(dibolCommand))
+        begin
+            dibolCommand(dblPos, ^size(dibolCommand)) = dibolCommand(dblPos+1, ^size(dibolCommand))
+            dblPos = %instr(1, dibolCommand, '  ')
+        end
+
+        ;; replace spaces (excluding first space) with comma's
+        dblPos = %instr(1, dibolCommand, ' ')
+        for dblPos from %instr(1, dibolCommand, ' ')+1 thru %trim(dibolCommand)
+        begin
+            if(dibolCommand(dblPos:1) == ' ')
+                dibolCommand(dblPos:1) = ','
+        end
+
+        freturn dibolCommand(1:%trim(dibolCommand)) + ',SYNERGYDE$ROOT:[DBL.BIN]SYNRTL/OPT'
+
+;----------------------------------------------------------------------------
+; process one "-" token (can be more than one compiler option)
+
+    processOption,
+
+        while(dblPos < dblLength)
+        begin
+            dblPos += 1
+            using dblCommand(dblPos:1) select
+            (' '),
+                exitloop
+            (delim),
+            begin
+                ;; no more options
+                dblPos += 1
+                call skipSpaces
+                dibolCommand = dibolCommand(1:%trim(dibolCommand)) + ' ' + dblCommand(dblPos,dblLength)
+                dblPos = dblLength + 1
+                exitloop
+            end
+
+            ('I'),
+                dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/information'
+            ('R'),
+            begin
+                token = '/resolvereferences='
+                call addToken
+            end
+            ('W'),
+            begin
+                token = '/ingorewarnings'
+                call addToken
+            end
+
+            ('d'),
+                dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/DEBUG'
+            ('e'),
+            begin
+                token = '/???'
+                call addToken
+            end
+            ('l'),
+            begin
+                token = '/libraryfile='
+                call addToken
+            end
+            ('m'),
+            begin
+                token = '/map='
+                call addToken
+            end
+            ('o'),
+            begin
+                token = '/EXECUTABLE='
+                call addToken
+            end
+            ('n'),
+                dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/NOOUTPUT'
+            ('r'),
+                dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/noresolvereferences'
+            ('s'),
+            begin
+                token = '/stacksize'
+                call addToken
+            end
+            ('w'),
+            begin
+                ;-wd or -w 0
+                token = '/NOWARNINGS'
+                ;;call addToken
+            end
+
+            (),
+                call unknownOption
+            endusing
+        end
+
+        return
+
+;----------------------------------------------------------------------------
+
+    unknownOption,
+
+        ;add processing logic for bad DBL options
+
+        return
+
+;----------------------------------------------------------------------------
+
+    processNextToken,
+        if(paramArray.Count > 0) then
+        begin
+            data spos ,int
+            data epos ,int
+            data pos ,int
+
+            token = (string)paramArray[0]
+
+            dibolCommand = dibolCommand(1:%trim(dibolCommand)) + token
+
+            pos = %EndOfToken(dblCommand, dblPos)
+            if(dblCommand(dblPos:1) == '"' && dblCommand(pos:1) = '"' && pos-dblPos > 1) then
+            begin
+                spos = dblPos+1
+                epos = pos - 1
+            end
+            else
+            begin
+                spos = dblPos
+                epos = pos
+            end
+
+            using TRUE select
+            (token.EndsWith('=')),
+                dibolCommand = dibolCommand(1:%trim(dibolCommand)) + dblCommand(spos,epos)
+            (token.EndsWith('="')),
+                dibolCommand = dibolCommand(1:%trim(dibolCommand)) + dblCommand(spos,epos) + '"'
+            endusing
+
+            dblPos = pos
+
+            call pop_paramArray
+        end
+        else
+        begin
+            dibolCommand = dibolCommand(1:%trim(dibolCommand)) + ' ' + dblCommand(dblPos,dblLength)
+            dblPos = dblLength + 1
+        end
+        return
+
+;----------------------------------------------------------------------------
+;push paramArray
+
+    addToken,
+        paramArray.Add(token)
+        return
+
+;----------------------------------------------------------------------------
+;pop paramArray
+
+    pop_paramArray,
+        if(paramArray.Count > 0)
+        paramArray.RemoveAt(0)
+        return
+
+;----------------------------------------------------------------------------
+
+    skipSpaces,
+        while(dblPos < dblLength && dblCommand(dblPos:1) == ' ')
+        dblPos += 1
+        return
+
+    endfunction
+
+;++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+endnamespace
+

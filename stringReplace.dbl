@@ -1,0 +1,112 @@
+;;***********************************************************************************
+;;
+;; Copyright    © 2009 Synergex International Corporation.  All rights reserved.
+;;
+;; Title:       stringReplace.dbl
+;;
+;; Type:        function
+;;
+;; Description:
+;;
+;; Author:      William Hawkins, Synergex Professional Services Group
+;;
+;; Copyright    © 2010 Synergex International Corporation.  All rights reserved.
+;;
+;; WARNING:     All content constituting or related to this code ("Code") is the
+;;              property of Synergex International Corporation ("Synergex") and
+;;              is protected by U.S. and international copyright laws.
+;;              If you were given this Code by a Synergex employee then you may
+;;              use and modify it freely for use within your applications.
+;;
+;;              However, you may use the Code only for your personal use.
+;;              Any other use, unless otherwise authorized in writing by
+;;              Synergex is strictly prohibited.  You may not under any
+;;              circumstances distribute this Code, or any modified version
+;;              or part of this Code, to any third party without first
+;;              obtaining written permission to do so from Synergex.
+;;              In using this Code you accept that it is provided as is,
+;;              and without support or warranty of any kind.
+;;
+;;              Neither Synergex nor the author accept any responsibility
+;;              for any losses or damages of any nature which may arise
+;;              from the use of this Code.  This header information must
+;;              remain unaltered in the Code at all times.  Possession
+;;              of this Code, or any modified version or part of this Code,
+;;              indicates your acceptance of these terms.
+;;
+;;***********************************************************************************
+
+namespace SynPSG.Core.Utilities
+
+    function stringReplace ,string
+        req in  inString    ,string
+        req in  replace     ,string
+        req in  with        ,string ;can be null to remove "replace" from "inString"
+        opt in  inPos       ,n ;only replace at this position
+        endparams
+        record
+            outString           ,string
+            start               ,int
+            pos                 ,int
+            replaceLength       ,int
+            withLength          ,int
+            inPosition          ,int
+        endrecord
+    proc
+        if(inString == ^null || inString.Length < 1)
+            freturn inString
+        if(replace == ^null || replace.Length < 1)
+            freturn inString
+
+        if(inString == replace)
+            freturn with
+
+        if(^passed(inPos)) then
+            inPosition = inPos
+        else
+            inPosition = 0
+
+        outString = inString
+        replaceLength = ^size(replace)
+        if(with != ^null)
+            withLength = with.Length
+
+        start = 1
+        while(pos=%instr(start, outString, replace))
+        begin
+            if(inPosition && pos != inPosition)
+            begin
+                start = pos + replaceLength
+                nextloop
+            end
+            if(with != ^null) then
+            begin
+                using pos select
+                (1),
+                    outString = with + outString(1+replaceLength, outString.Length)
+                (outString.Length),
+                    outString = outString(1, pos-1) + with
+                (),
+                    outString = outString(1, pos-1) + with + outString(pos+replaceLength, outString.Length)
+                endusing
+                start = pos + withLength
+            end
+            else
+            begin
+                using pos select
+                (1),
+                    outString = outString(1+replaceLength, outString.Length)
+                (outString.Length),
+                    outString = outString(1, pos-1)
+                (),
+                    outString = outString(1, pos-1) + outString(pos+replaceLength, outString.Length)
+                endusing
+                start = pos
+            end
+        end
+        freturn outString
+
+    endfunction
+
+endnamespace
+

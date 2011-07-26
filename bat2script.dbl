@@ -1,0 +1,1210 @@
+;;***********************************************************************************
+;;
+;; Title:       bat2script.dbl
+;;
+;; Type:        Program
+;;
+;; Description: Convert Workbench batch files into Unix/OpenVMS build files
+;;
+;; Author:      William Hawkins, Synergex Professional Services Group
+;;
+;; Copyright    © 2010 Synergex International Corporation.  All rights reserved.
+;;
+;; WARNING:     All content constituting or related to this code ("Code") is the
+;;              property of Synergex International Corporation ("Synergex") and
+;;              is protected by U.S. and international copyright laws.
+;;              If you were given this Code by a Synergex employee then you may
+;;              use and modify it freely for use within your applications.
+;;
+;;              However, you may use the Code only for your personal use.
+;;              Any other use, unless otherwise authorized in writing by
+;;              Synergex is strictly prohibited.  You may not under any
+;;              circumstances distribute this Code, or any modified version
+;;              or part of this Code, to any third party without first
+;;              obtaining written permission to do so from Synergex.
+;;              In using this Code you accept that it is provided as is,
+;;              and without support or warranty of any kind.
+;;
+;;              Neither Synergex nor the author accept any responsibility
+;;              for any losses or damages of any nature which may arise
+;;              from the use of this Code.  This header information must
+;;              remain unaltered in the Code at all times.  Possession
+;;              of this Code, or any modified version or part of this Code,
+;;              indicates your acceptance of these terms.
+;;
+;;***********************************************************************************
+
+import System.Collections
+import SynPSG.Core.Utilities
+
+namespace SynPSG.Utilities.bat2script
+
+.define D_APP_VERSION   'v1.1'
+
+    main
+
+.define D_CONV_NONE     0
+.define D_CONV_OPENVMS  1
+.define D_CONV_UNIX     2
+
+.define D_MAX_BUFR_SIZE 8192
+
+        record
+            batFilename     ,a256           ;; batch filename
+            destFilename    ,a256           ;; output filename
+            winRoot         ,a80            ;; windows root
+            destRoot        ,a80            ;; destination root
+            convType        ,int            ;; see D_CONV_* defines
+
+            batCh           ,int            ;; batch file channel
+            destCh          ,int            ;; output channel
+            ttCh            ,int            ;; screen channgel
+            logical         ,a80            ;; logical
+            logical_value   ,a1024          ;; logical transation
+            cmdlin          ,a1024          ;; program command line
+            bufr            ,a D_MAX_BUFR_SIZE
+            blankLine       ,boolean        ;; just printed a blank line
+            expandLogicals  ,boolean        ;; expand logicals
+            replaceLogicals ,boolean        ;; replace path with logical
+            inDBLcommand    ,boolean        ;; processing a DBL command
+            inSETcommand    ,boolean        ;; processing a SET command
+            eofBat          ,boolean        ;; eof in input batch file
+            commentChar     ,a1             ;; # or !
+            logicals        ,@System.Collections.ArrayList
+            logicalValues   ,@System.Collections.ArrayList
+            logicalExpValues,@System.Collections.ArrayList
+            exitStatus      ,int
+
+            pos             ,int            ;;general purpose position
+            pos2            ,int            ;;general purpose position
+            start           ,int            ;;start position for %instr
+
+    proc
+        open(ttCh=%syn_freechn(), O, 'TT:')
+
+        cmdln(cmdlin)
+
+        ;; cmdlin = 'dbr bat2script -i test.bat -u /usr2 -v $disk2: -w C: -r -e'
+
+        if(%instr(1, cmdlin, ' -h ') || %instr(1, cmdlin, ' -? '))
+        begin
+            writes(ttCh, "BAT2SCRIPT - Convert Workbench project batch files  "+D_APP_VERSION)
+            writes(ttCh, "")
+            writes(ttCh, "dbr bat2script -i <batfile> [-o <scriptfile>] [-w <winRoot>] [-v|u <destRoot>] [-e] [-r]")
+            writes(ttCh, "")
+            writes(ttCh, " -i <batFile> = name of WorkBench project batch file to be converted (optional on Windows)")
+            writes(ttCh, "")
+            writes(ttCh, " -o <scriptfile> = name of destination script file (derived from batFile is not passed)")
+            writes(ttCh, "")
+            writes(ttCh, " -w <winRoot> = Windows root folder (to be replaced)")
+            writes(ttCh, "")
+            writes(ttCh, " -v <destRoot> = output OpenVMS Command file (.vms_com)")
+            writes(ttCh, " -u <destRoot> = output UNIX shell script (.sh)")
+            writes(ttCh, "    <destRoot> in the destination root folder (replaces winRoot)")
+            writes(ttCh, "")
+            writes(ttCh, " -e = expand logicals")
+            writes(ttCh, " -r = replace paths with logicals (where possible)")
+            writes(ttCh, "")
+            sleep 5
+            flags(7000000,1)
+            stop D_EXIT_SUCCESS
+        end
+
+        ;; input batch file
+        pos = %instr(1, cmdlin, ' -i ')
+        if(pos > 0)
+        begin
+            pos += 4
+            pos2 = %instr(pos, cmdlin, ' -')
+            if(!pos2)
+                pos2 = %trim(cmdlin)
+            if(pos2 >= pos)
+                batFilename = cmdlin(pos,pos2)
+        end
+
+        if(!batFilename)
+        begin
+            writes(ttCh, "No input file specified")
+            sleep 5
+            flags(7000000,1)
+            stop D_EXIT_FAILURE
+        end
+
+        open(batCh=%syn_freechn(), I, batFilename) [ERR=noBatFilename]
+        close batCh
+        if(FALSE)
+        begin
+    noBatFilename,
+            writes(ttCh, "Error "+%string(%error)+" opening input file"
+    &               + " ["+%atrim(batFilename)+"]")
+            sleep 5
+            flags(7000000,1)
+            stop D_EXIT_FAILURE
+        end
+
+        ;; Windows root folder
+        pos = %instr(1, cmdlin, ' -w ')
+        if(pos > 0)
+        begin
+            pos += 4
+            pos2 = %instr(pos, cmdlin, ' -')
+            if(!pos2)
+                pos2 = %trim(cmdlin)
+            if(pos2 >= pos)
+                winRoot = cmdlin(pos,pos2)
+        end
+
+        ;; replace paths with logicals (where possible)
+        replaceLogicals = (%instr(1, cmdlin, ' -r ') > 0)
+
+        ;; conversion type
+        convType = D_CONV_NONE
+
+        repeat
+        begin
+            call doConversion
+
+            ;; see if there's another conversion to do
+            if(convType == D_CONV_OPENVMS && %instr(1, cmdlin, ' -u '))
+            begin
+                convType = D_CONV_UNIX
+                nextloop
+            end
+
+            exitloop
+        end
+
+        flags(7000000,1)
+        stop D_EXIT_SUCCESS
+
+;;----------------------------------------------------------------------------
+
+    doConversion,
+
+        clear destFilename, destRoot
+
+        ;; OpenVMS conversion + destination root folder
+        pos = %instr(1, cmdlin, ' -v ')
+        if(pos > 0)
+        begin
+            if(convType == D_CONV_NONE || convType == D_CONV_OPENVMS)
+            begin
+                pos += 3
+                pos2 = %instr(pos, cmdlin, ' -')
+                if(!pos2)
+                    pos2 = %trim(cmdlin)
+                if(pos2 > pos)
+                destRoot = cmdlin(pos+1,pos2)
+                convType = D_CONV_OPENVMS
+            end
+        end
+
+        ;; Unix conversion + destination root folder
+        pos = %instr(1, cmdlin, ' -u ')
+        if(pos > 0)
+        begin
+            if(convType == D_CONV_NONE || convType == D_CONV_UNIX)
+            begin
+                pos += 3
+                pos2 = %instr(pos, cmdlin, ' -')
+                if(!pos2)
+                    pos2 = %trim(cmdlin)
+                if(pos2 > pos)
+                destRoot = cmdlin(pos+1,pos2)
+                convType = D_CONV_UNIX
+            end
+        end
+
+        if(convType == D_CONV_NONE)
+        begin
+            writes(ttCh, "No conversion type specified")
+            sleep 5
+            flags(7000000,1)
+            stop D_EXIT_FAILURE
+        end
+
+        ;; output script/command file
+        pos = %instr(1, cmdlin, ' -o ')
+        if(pos > 0)
+        begin
+            pos += 4
+            pos2 = %instr(pos, cmdlin, ' -')
+            if(!pos2)
+                pos2 = %trim(cmdlin)
+            if(pos2 >= pos)
+                destFilename = cmdlin(pos,pos2)
+        end
+
+        ;; default output filename from batch filename
+        if(!destFilename)
+        begin
+            using convType select
+            (D_CONV_OPENVMS),
+                destFilename = %upcase(%atrim(batFilename)) - '.BAT' + '.VMS_COM'
+            (D_CONV_UNIX),
+                destFilename = %atrim(batFilename) - '.bat' + '.sh'
+            endusing
+        end
+
+        using convType select
+        (D_CONV_OPENVMS),
+        begin
+            commentChar = '!'
+            expandLogicals = TRUE
+        end
+        (D_CONV_UNIX),
+        begin
+            commentChar = '#'
+            expandLogicals = (%instr(1, cmdlin, ' -e ') > 0)
+        end
+        endusing
+
+        logicals = new System.Collections.ArrayList()
+        logicalValues = new System.Collections.ArrayList()
+        logicalExpValues = new System.Collections.ArrayList()
+
+        open(batCh=%syn_freechn(), I, batFilename)
+
+        ;; read batch file, and put all known logicals into the arraylist
+        call parseFileForLogicals
+
+        find(batCh,, ^FIRST)
+
+        open(destCh=%syn_freechn(), O, destFilename)
+
+        using convType select
+        (D_CONV_OPENVMS),
+        begin
+            bufr = commentChar + " Workbench build file converted to OpenVMS command file"
+            call write_bufr
+        end
+        (D_CONV_UNIX),
+        begin
+            bufr = commentChar + " Workbench build file converted to UNIX script"
+            call write_bufr
+        end
+        endusing
+
+        clear bufr
+        call write_bufr
+
+        eofBat = FALSE
+        repeat
+        begin
+            call read_bufr
+            if(eofBat)
+                exitloop
+
+            ;; ignore these lines in the batch file
+            using %upcase(bufr) select
+            ('@REM '),
+                nextloop ;; ignore comments
+            ('@SETLOCAL ','@ENDLOCAL '),
+                nextloop ;; ignore variable scope
+            ('@ECHO '),
+                nextloop ;; ignore echo
+            ('IF ERRORLEVEL '),
+                nextloop ;; ignore errors
+            endusing
+
+            inSETcommand = FALSE
+            inDBLcommand = FALSE
+
+            using %upcase(bufr) select
+            ('SET '),
+            begin
+                inSETcommand = TRUE
+
+                call process_set
+
+                call process_logicals
+
+                call process_root
+
+                bufr = %convert_to_native_format(bufr, convType)
+            end
+            ('DBLPROTO '),
+            begin
+                inDBLcommand = TRUE
+
+                call process_line
+            end
+            ('DBL '),
+            begin
+                inDBLcommand = TRUE
+
+                call process_line
+
+                using convType select
+                (D_CONV_OPENVMS),
+                    bufr = %dbl2dibol(bufr)
+                endusing
+            end
+            ('DBLINK '),
+            begin
+                inDBLcommand = TRUE
+
+                call process_line
+
+                using convType select
+                (D_CONV_OPENVMS),
+                    bufr = %dblink2link(bufr)
+                endusing
+            end
+            ('DBLIBR '),
+            begin
+                inDBLcommand = TRUE
+
+                call process_line
+
+                using convType select
+                (D_CONV_OPENVMS),
+                    bufr = %dblibr2library(bufr)
+                endusing
+            end
+            ('IF EXIST '),
+            begin
+                call process_line
+
+                call process_delete
+            end
+            ;;('@REM '),
+            ;;    bufr = commentChar + bufr(5,^size(bufr))
+            ;;('@SETLOCAL ','@ENDLOCAL '),
+            ;;    bufr = commentChar + ' ' + bufr
+            ;;('@ECHO '),
+            ;;    bufr = commentChar + ' echo' + bufr(6,^size(bufr))
+            ;;('IF ERRORLEVEL '),
+            ;;    bufr = commentChar + ' ' + bufr
+            ('REM '), ;;not in Workbench batch files
+                bufr = commentChar + bufr(4,^size(bufr))
+            (),
+            begin
+                call process_line
+            end
+            endusing
+
+            call write_bufr
+        end
+
+        using convType select
+        (D_CONV_OPENVMS),
+        begin
+            if(blankLine == FALSE)
+            begin
+                clear bufr
+                call write_bufr
+            end
+            bufr = 'EXIT'
+            call write_bufr
+        end
+        (D_CONV_UNIX),
+        begin
+            clear bufr
+            call write_bufr
+        end
+        endusing
+
+        close destCh
+        close batCh
+
+        clear logicals
+        clear logicalValues
+        clear logicalExpValues
+
+        return
+
+;;----------------------------------------------------------------------------
+
+    read_bufr,
+
+        reads(batCh, bufr, eofBat)
+
+        ;; convert non-printable characters (e.g. tabs) to spaces
+        for pos from 1 thru %trim(bufr)
+        begin
+            if(bufr(pos:1) < ' ')
+            bufr(pos:1) = ' '
+        end
+
+        return
+
+    eofbat,
+        eofBat = TRUE
+        return
+
+;;----------------------------------------------------------------------------
+
+    write_bufr,
+
+        ;; only write out 1 blank line (consecutively)
+        if(bufr) then
+        begin
+            using convType select
+            (D_CONV_OPENVMS),
+                display(destCh, '$ ', bufr(1:%trim(bufr)), 13, 10)
+            (D_CONV_UNIX),
+                display(destCh, bufr(1:%trim(bufr)), 10)
+            endusing
+            blankLine = FALSE
+        end
+        else
+        begin
+            if(blankLine == FALSE)
+            begin
+                using convType select
+                (D_CONV_OPENVMS),
+                    display(destCh, '$', commentChar, 13, 10)
+                (D_CONV_UNIX),
+                    display(destCh, commentChar, 10)
+                endusing
+            end
+            blankLine = TRUE
+        end
+
+        return
+
+;;----------------------------------------------------------------------------
+
+    process_line,
+
+        if(bufr)
+        begin
+            call process_logicals
+
+            call replace_logicals
+
+            call process_root
+
+            call process_filenames
+        end
+
+        return
+
+;;----------------------------------------------------------------------------
+;; replace Windows root folder with Remote folder
+
+    process_root,
+
+        if(winRoot && destRoot && bufr)
+        begin
+            pos2 = %trim(winRoot)
+            start = 1
+            repeat
+            begin
+                pos = %instr(start, bufr, winRoot(1:pos2))
+                if(pos < 2)
+                exitloop
+                if(%isFileDelimiter(bufr(pos-1:1)) == TRUE)
+                    bufr = stringReplace(bufr, bufr(pos:pos2), %atrim(destRoot), pos)
+                start = pos + pos2
+            end
+        end
+
+        return
+
+;;----------------------------------------------------------------------------
+;; multiple filenames are space delimited
+
+    process_filenames,
+
+        begin
+            data segStart   ,int
+            data segEnd     ,int
+            data bufrLen    ,int
+            data outBufr    ,string
+            data fileName   ,string
+
+            segStart = %instr(5, bufr, '\')
+            if(!segStart)
+                return
+
+            bufrLen = %trim(bufr)
+
+            segEnd = segStart + 1
+            repeat
+            begin
+                if(segEnd > BufrLen)
+                exitloop
+                if(%isFileDelimiter(bufr(segEnd:1)) == TRUE)
+                    exitloop
+                segEnd += 1
+            end
+            segEnd -= 1
+
+            while(segStart > 1 && %isFileDelimiter(bufr(segStart:1)) == FALSE)
+            segStart -= 1
+            if(segStart > 1) then
+                outBufr = bufr(1,segStart-1)
+            else
+                clear outBufr
+            segStart += 1
+
+            repeat
+            begin
+                if(segEnd <= segStart)
+                    exitloop
+
+                using convType select
+                (D_CONV_OPENVMS),
+                    fileName = %convert_to_vms(bufr(segStart, segEnd))
+                (D_CONV_UNIX),
+                    fileName = %convert_to_unix(bufr(segStart, segEnd))
+                endusing
+
+                if(outBufr) then
+                    outBufr = outBufr + ' ' + fileName
+                else
+                    outBufr = fileName
+
+                segStart = segEnd + 1
+                while(segStart <= bufrLen && %isFileDelimiter(bufr(segStart:1)) == TRUE)
+                    segStart += 1
+                if(segStart > bufrLen)
+                exitloop
+
+                segEnd = segStart + 1
+                repeat
+                begin
+                    if(segEnd > BufrLen)
+                    exitloop
+                    if(%isFileDelimiter(bufr(segEnd:1)) == TRUE)
+                        exitloop
+                    segEnd += 1
+                end
+                segEnd -= 1
+            end
+
+            bufr = outBufr
+
+        end
+
+        return
+
+;;----------------------------------------------------------------------------
+
+    process_delete,
+
+        if(%instr(2, bufr, '.dbp'))
+        begin
+            call process_delete_dbp
+            return
+        end
+
+        return
+
+;;----------------------------------------------------------------------------
+
+    process_delete_dbp,
+
+        ;; skipping the line just read
+
+        repeat
+        begin
+            data bufrPos ,int ,1
+
+            call read_bufr
+            if(bufr == ')')
+                exitloop
+
+            call process_line
+
+            ;; find first non-whitespace character
+            while (bufrPos < %trimz(bufr) && bufr(bufrPos:1) == ' ')
+                bufrPos += 1
+            if(bufrPos < %trimz(bufr)-4 && bufr(bufrPos:4) == 'del ')
+            begin
+                bufrPos += 4
+                pos2 = %instr(bufrPos, bufr, '.dbp')
+                if(pos2)
+                begin
+                    using convType select
+                    (D_CONV_OPENVMS),
+                    begin
+                        bufr = %convert_to_vms(bufr)
+                        bufr = 'DELETE/NOLOG ' + bufr(bufrPos,%trim(bufr)) + ';*'
+                    end
+                    (D_CONV_UNIX),
+                    begin
+                        bufr = %convert_to_unix(bufr)
+                        pos = %rvstr(bufrPos, bufr, '\')
+                        if(!pos)
+                            pos = bufrPos
+                        if(pos2 > pos)
+                        bufr = 'rm -f ' + bufr(pos,pos2+3)
+                    end
+                    endusing
+                end
+            end
+
+            call write_bufr
+        end
+
+        ;; skipping the line just read
+
+        ;; blank line to be written next
+        clear bufr
+
+        return
+
+;;----------------------------------------------------------------------------
+
+    process_set,
+
+        pos2 = %instr(5, bufr, '=')
+        if(!pos2)
+            return
+        ;; ignore any trailing spaces
+        pos2 -= 1
+        while(bufr(pos2:1) == ' ')
+            pos2 -= 1
+        pos = %rvstr(1, bufr(1:pos2), ' ')
+        pos += 1
+
+        logical = bufr(pos,pos2)
+
+        logical_value = %findLogical(bufr(pos,pos2), logicals, logicalValues)
+
+        using convType select
+        (D_CONV_OPENVMS),
+            bufr = 'DEFINE/NOLOG ' + %atrim(logical) + ' ' + logical_value
+        (D_CONV_UNIX),
+            bufr = 'export ' + %atrim(logical)+'='+%atrim(logical_value)
+        endusing
+
+        return
+
+;;----------------------------------------------------------------------------
+;; replace Windows logicals with native/expanded logicals
+
+    process_logicals,
+
+        begin
+            data logStart   ,int
+
+            logStart = 1
+            repeat
+            begin
+                pos = %instr(logStart, bufr, '%')
+                if(!pos)
+                    exitloop
+                pos2 = %instr(pos+1, bufr, '%')
+                if(!pos2)
+                    exitloop
+
+                logical = bufr(pos+1, pos2-1)
+                using logical select
+                ('SYNPROJECTROOT '),
+                begin
+                    ;; add trailing \
+                    bufr = bufr(1,pos2) + '\' + bufr(pos2+1, ^size(bufr))
+                    logStart = pos2+1
+                end
+                endusing
+
+                if(expandLogicals == TRUE) then
+                    logical_value = %findLogical(bufr(pos+1, pos2-1),
+&                       logicals, logicalValues)
+                else
+                    clear logical_value
+
+                if(!logical_value)
+                begin
+                    using convType select
+                    (D_CONV_OPENVMS),
+                    begin
+                        ;; OpenVMS must use expanded logicals, having got to this
+                        ;; code, means the logical is not defined in the batch file
+                        logStart = pos2+1
+                        nextloop
+                    end
+                    (D_CONV_UNIX),
+                        logical_value = '$' + bufr(pos+1,pos2-1)
+                    endusing
+                end
+
+                bufr = stringReplace(bufr, bufr(pos, pos2), %atrim(logical_value), pos)
+            end
+
+        end
+
+        if(expandLogicals == TRUE)
+        begin
+            ;; remove relative pathing
+            while(pos2=%instr(1, bufr, '..\'))
+            begin
+                pos = %rvstr(1, bufr(1,pos2-2), '\')
+                if(pos)
+                    bufr = bufr(1,pos) + bufr(pos2+3,^size(bufr))
+            end
+        end
+
+        return
+
+;;----------------------------------------------------------------------------
+;; try to replace filespecs with logicals
+
+    replace_logicals,
+
+        if(replaceLogicals == TRUE)
+        begin
+            data bufrLen    ,int
+            bufrLen = %trim(bufr)
+            clear pos
+            repeat
+            begin
+                pos2 = %rvstr(1, bufr(1,bufrLen), '\')
+                if(pos2 < 1)
+                exitloop
+                pos = pos2 - 1
+                while(pos > 0 && !isFileDelimiter(bufr(pos:1)))
+                pos -= 1
+                pos += 1
+                logical_value = %findLogicalValue(bufr(pos,pos2-1),
+&                   logicals, logicalExpValues)
+                if(logical_value)
+                begin
+                    if(inDBLcommand == TRUE) then
+                    begin
+                        logical_value = %atrim(logical_value) + ':'
+                        bufr = stringReplace(bufr, bufr(pos,pos2), %atrim(logical_value), pos)
+                    end
+                    else
+                    begin
+                        using convType select
+                        (D_CONV_OPENVMS),
+                        begin
+                            nop
+                        end
+                        (D_CONV_UNIX),
+                        begin
+                            logical_value = '$' + %atrim(logical_value) + '\'
+                            bufr = stringReplace(bufr, bufr(pos,pos2), %atrim(logical_value), pos)
+                        end
+                        endusing
+                    end
+                end
+                bufrLen = pos-1
+                if(bufrLen < 1)
+                exitloop
+            end
+        end
+
+        return
+
+;;----------------------------------------------------------------------------
+;; read entire batch file, and load all logicals into a collection
+
+    parseFileForLogicals,
+
+        eofBat = FALSE
+        repeat
+        begin
+            call read_bufr
+            if(eofBat)
+                exitloop
+
+            using %upcase(bufr) select
+            ('SET '),
+            begin
+                inSETcommand = TRUE
+                inDBLcommand = FALSE
+
+                call parseLogicals
+            end
+            endusing
+        end
+
+        ;;for pos from 0 thru logicals.Count-1
+        ;;    writes(ttch, (a)logicals[pos]+'  '+(a)logicalValues[pos]+' {'+(a)logicalExpValues[pos]+'}')
+        ;;accept(ttch, pos)
+
+        return
+
+;;----------------------------------------------------------------------------
+
+    parseLogicals,
+
+        pos2 = %instr(5, bufr, '=')
+        if(!pos2)
+            return
+
+        ;; ignore any trailing spaces
+        pos2 -= 1
+        while(bufr(pos2:1) == ' ' && pos2 > 1)
+        pos2 -= 1
+        pos = %rvstr(1, bufr(1:pos2), ' ')
+        pos += 1
+        logical = bufr(pos,pos2)
+
+        pos2 = %trim(bufr)
+        pos = %instr(5, bufr, '=') + 1
+        while(bufr(pos:1) == ' ' && pos < pos2)
+        pos += 1
+
+        if(pos2 >= pos) then
+        begin
+            ;; adjust for logical values wrapped in double quotes
+            if(bufr(pos:1) == '"' && bufr(pos2:1) == '"')
+            begin
+                pos += 1
+                pos2 -= 1
+            end
+            if(pos2 >= pos) then
+                logical_value = bufr(pos,pos2)
+            else
+                clear logical_value
+        end
+        else
+            clear logical_value
+
+        if(logical == 'SYNPROJECTROOT ')
+        begin
+            ;; have to strip trailing directory delimiter, and add it when used
+            ;; so Unix can work with logicals
+            ;; e.g. %logical%folder\file doesn't work as $logicalfolder\file
+            ;; have to make it this instead %logical%\folder\file so we can
+            ;; (eventually) translate it as $logical/folder/file
+            pos = %trim(logical_value)
+            if(logical_value(pos:1) == '\')
+                logical_value(pos:1) = ' '
+        end
+
+        if(!%findLogical(%atrim(logical), logicals, logicalValues))
+        begin
+            logicalValues.Add((@a)%atrim(logical_value))
+
+            ;; update logical_value with expanded logical values
+            if(expandLogicals == TRUE)
+            begin
+                ;; remove relative pathing
+                data logStart   ,int
+                logStart = 1
+                while(pos2=%instr(logStart, logical_value, '..\'))
+                begin
+                    pos = %rvstr(1, logical_value(1,pos2-2), '\')
+                    if(pos)
+                        logical_value = logical_value(1,pos)
+&                           + logical_value(pos2+3,^size(logical_value))
+                    logStart = pos2 + 3
+                end
+
+                logical_value = %expandLogical(%atrim(logical_value),
+&                   logicals,logicalExpValues,convType)
+            end
+            logicalExpValues.Add((@a)%atrim(logical_value))
+            logicals.Add((@a)%atrim(logical))
+        end
+
+        return
+
+    endmain
+
+;;++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+    function findLogical ,a
+        req in  aLogical        ,string
+        req in  logicals        ,@System.Collections.Arraylist
+        req in  logicalValues   ,@System.Collections.ArrayList
+        endparams
+
+        record
+            ctr         ,int
+        endrecord
+    proc
+        for ctr from 0 thru logicals.Count-1
+        begin
+            if(aLogical == (a)logicals[ctr])
+            freturn (a)logicalValues[ctr]
+        end
+        freturn ''
+
+    endfunction
+
+;;++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+    function findLogicalValue ,string
+        req in  aLogicalValue   ,string
+        req in  logicals        ,@System.Collections.Arraylist
+        req in  logicalValues   ,@System.Collections.ArrayList
+        endparams
+
+        record
+            ctr         ,int
+        endrecord
+    proc
+        for ctr from 0 thru logicals.Count-1
+        begin
+            if(aLogicalValue == (a)logicalValues[ctr])
+            freturn (a)logicals[ctr]
+        end
+        freturn ''
+
+    endfunction
+
+;;++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+;; Expand logicals into fully qualified path
+
+    function expandLogical ,a
+        req in  abufr           ,string
+        req in  logicals        ,@System.Collections.Arraylist
+        req in  logicalExpValues,@System.Collections.ArrayList
+        req in  convType        ,int
+        endparams
+        record
+            logStart        ,int
+            logValue        ,string
+            pos             ,int
+            pos2            ,int
+            expandedBufr    ,a1024
+        endrecord
+
+    proc
+        expandedBufr = abufr
+
+        logStart = 1
+        repeat
+        begin
+            pos = %instr(logStart, expandedBufr, '%')
+            if(!pos)
+                exitloop
+            pos2 = %instr(pos+1, expandedBufr, '%')
+            if(!pos2)
+                exitloop
+
+            logValue = %findLogical(expandedBufr(pos+1, pos2-1),
+&               logicals, logicalExpValues)
+
+            if(logValue == ^null || logValue.Length < 1)
+            begin
+                using convType select
+                (D_CONV_OPENVMS),
+                begin
+                    logStart = pos2 + 1
+                    nextloop
+                end
+                (D_CONV_UNIX),
+                    logValue = '$' + expandedBufr(pos+1, pos2-1) + '\'
+                endusing
+            end
+
+            expandedBufr = stringReplace(expandedBufr, expandedBufr(pos, pos2),
+&               logValue, pos)
+        end
+
+        freturn expandedBufr(1:%trim(expandedBufr))
+    end
+
+;;++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+;; convert Windows folder specification to native format
+
+    function convert_to_native_format ,string
+        req in      bufr        ,a
+        req in      convType    ,int
+        endparams
+
+        record
+            firstDelimPos   ,int
+            lastDelimPos    ,int
+            pos             ,int
+            SegStart        ,int
+            SegEnd          ,int
+            outBufr         ,string
+            tmpBufr         ,string
+        endrecord
+
+    proc
+        ;; is the folder definition a search list
+        segEnd = %instr(1, bufr, ',')
+        if(!segEnd)
+        begin
+            using convType select
+            (D_CONV_OPENVMS),
+                outBufr = %convert_to_vms(bufr)
+            (D_CONV_UNIX),
+                outBufr = %convert_to_unix(bufr)
+            endusing
+            freturn outBufr
+        end
+
+        ;; find start of first segment of search list
+        if(segEnd > 2) then
+        begin
+            segEnd -= 1
+            segStart = segEnd - 1
+            while(segStart > 0 && %isFileDelimiter(bufr(segStart:1)) == FALSE)
+            segStart -= 1
+            if(segStart == 0 || %isFileDelimiter(bufr(segStart:1)) == TRUE)
+                segStart += 1
+        end
+        else
+            segStart = 1
+
+        if(segStart > 1) then
+            outBufr = bufr(1,segStart-1)
+        else
+            clear outBufr
+
+        repeat
+        begin
+            if(segStart > segEnd)
+            exitloop
+
+            using convType select
+            (D_CONV_OPENVMS),
+                tmpBufr = %convert_to_vms(bufr(segStart, segEnd))
+            (D_CONV_UNIX),
+                tmpBufr = %convert_to_unix(bufr(segStart, segEnd))
+            endusing
+            outBufr = outBufr + tmpBufr + bufr(segEnd+1:1)
+
+            segStart = segEnd + 2
+            if(segStart > %trim(bufr))
+            exitloop
+
+            segEnd = instr(segStart, bufr, ',')
+            if(!segEnd) then
+                segEnd = %trim(bufr)
+            else
+                segEnd -= 1
+        end
+
+        freturn outBufr
+
+    endfunction
+
+;;++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+;; convert Windows file/dir specification to OpenVMS format
+
+    function convert_to_vms ,a
+        req in  bufr    ,a
+        endparams
+
+        record
+            firstDelimPos   ,int
+            lastDelimPos    ,int
+            pos             ,int
+            outBufr         ,a D_MAX_BUFR_SIZE
+        endrecord
+
+    proc
+
+        outBufr = bufr
+
+        firstDelimPos = %instr(1, outBufr, '\')
+        if(!firstDelimPos)
+            freturn outBufr(1, %trim(outBufr))
+
+        lastDelimPos = %rvstr(1, outBufr, '\')
+        if(lastDelimPos == firstDelimPos) then
+        begin
+            ;; We only have one \
+            ;; if we have something like this  $DISK:[DIR]\dir
+            ;; we can make it $DISK:[DIR.dir]
+            ;; if we have something like this  $DISK:[DIR]\
+            ;; we can make it $DISK:[DIR]
+            ;; else we assume it's a partial directory e.g. DIR\dir -> DIR.dir
+            if(firstDelimPos > 1 && firstDelimPos < %trim(outBufr)) then
+            begin
+                using outBufr(firstDelimPos-1:1) select
+                (']'),
+                    outBufr = outBufr(1, firstDelimPos-2)
+&                       + '.' + outBufr(firstDelimPos+1, %trim(outBufr)) + ']'
+                (':'),
+                    outBufr = outBufr(1, firstDelimPos-1)
+&                       + '[' + outBufr(firstDelimPos+1, %trim(outBufr)) + ']'
+                (),
+                    outBufr(firstDelimPos:1) = '.'
+                endusing
+            end
+            else
+            begin
+                using outBufr(firstDelimPos-1:1) select
+                (']', ':'),
+                    outBufr(firstDelimPos:1) = ' '
+                ;; outBufr = outBufr(1, firstDelimPos-1) + '[000000]'
+                (),
+                    outBufr(firstDelimPos:1) = '.'
+                endusing
+
+            end
+        end
+        else
+        begin
+            pos = %rvstr(1, outBufr, '.')
+            if(pos <= lastDelimPos)
+                lastDelimPos = %trim(outBufr)
+            if(outBufr(lastDelimPos:1) != '\')
+                lastDelimPos += 1
+            outBufr(firstDelimPos:1) = '['
+            outBufr(lastDelimPos:1) = ']'
+            while(pos=%instr(1,outBufr, '\'))
+                outBufr(pos:1) = '.'
+        end
+
+        while(pos=%instr(1, outBufr, ']['))
+        begin
+            using pos select
+            (1),
+                outBufr = '.' + outBufr(pos+2,^size(outBufr))
+            (> ^size(outBufr)-2),
+                outBufr = outBufr(1:pos-1) + '.'
+            (),
+                outBufr = outBufr(1:pos-1) + '.' + outBufr(pos+2,^size(outBufr))
+            endusing
+        end
+
+        while(pos=%instr(1, outBufr, '].'))
+        begin
+            using pos select
+            (1),
+                outBufr = outBufr(pos+1,^size(outBufr))
+            (),
+                outBufr = outBufr(1:pos-1) + outBufr(pos+1,^size(outBufr))
+            endusing
+        end
+
+        freturn outBufr(1, %trim(outBufr))
+
+    endfunction
+
+;;++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+;; convert Windows file/dir specification to UNIX format
+
+    function convert_to_unix ,a
+        req in   bufr    ,a
+        endparams
+
+        record
+            delimPos         ,int
+            outBufr          ,a D_MAX_BUFR_SIZE
+        endrecord
+
+    proc
+
+        outBufr = bufr
+        while(delimPos=%instr(1, outBufr, '\'))
+            outBufr(delimPos:1) = '/'
+
+        freturn outBufr(1, %trim(outBufr))
+
+    endfunction
+
+;;++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+;; is the character provided a character that is not part of a filename
+
+    function isFileDelimiter ,boolean
+        req in char ,a
+        endparams
+    proc
+        using char select
+        (',', ' ', '=', '"'),
+            freturn TRUE
+        endusing
+        freturn FALSE
+    endfunction
+
+;;++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+endnamespace
+

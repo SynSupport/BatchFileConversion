@@ -1,0 +1,76 @@
+;;***********************************************************************************
+;;
+;; Copyright    © 2009 Synergex International Corporation.  All rights reserved.
+;;
+;; Title:       endOfToken.dbl
+;;
+;; Type:        function
+;;
+;; Description:
+;;
+;; Author:      William Hawkins, Synergex Professional Services Group
+;;
+;; Copyright    © 2010 Synergex International Corporation.  All rights reserved.
+;;
+;; WARNING:     All content constituting or related to this code ("Code") is the
+;;              property of Synergex International Corporation ("Synergex") and
+;;              is protected by U.S. and international copyright laws.
+;;              If you were given this Code by a Synergex employee then you may
+;;              use and modify it freely for use within your applications.
+;;
+;;              However, you may use the Code only for your personal use.
+;;              Any other use, unless otherwise authorized in writing by
+;;              Synergex is strictly prohibited.  You may not under any
+;;              circumstances distribute this Code, or any modified version
+;;              or part of this Code, to any third party without first
+;;              obtaining written permission to do so from Synergex.
+;;              In using this Code you accept that it is provided as is,
+;;              and without support or warranty of any kind.
+;;
+;;              Neither Synergex nor the author accept any responsibility
+;;              for any losses or damages of any nature which may arise
+;;              from the use of this Code.  This header information must
+;;              remain unaltered in the Code at all times.  Possession
+;;              of this Code, or any modified version or part of this Code,
+;;              indicates your acceptance of these terms.
+;;
+;;***********************************************************************************
+
+namespace SynPSG.Core.Utilities
+
+    function endOfToken     ,int
+        req in  aCommand    ,a              ;;command line
+        req in  aCurrentPos ,int            ;;current position in command line
+        endparams
+
+        record
+            cmdLength       ,int            ;;length of command line
+            delimChar       ,a1             ;;token delimeter character
+            eotPos          ,int            ;;end of token position in command line
+        endrecord
+    proc
+
+        cmdLength = %trimz(aCommand)
+        if(aCurrentPos > cmdLength)
+            freturn 0
+
+        if(aCommand(aCurrentPos:1) == '"') then
+            delimChar = '"'
+        else
+            delimChar = ' '
+
+        eotPos = %instr(aCurrentPos+1, aCommand, delimChar)
+        if(!eotPos) then
+            eotPos = %trim(aCommand)
+        else
+        begin
+            if(delimChar == ' ' && eotPos > 1)
+                eotPos -= 1
+        end
+
+        freturn eotPos
+
+    endfunction
+
+endnamespace
+

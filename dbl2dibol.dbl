@@ -1,0 +1,454 @@
+;;***********************************************************************************
+;;
+;; Title:       dbl2dibol.dbl
+;;
+;; Type:        Program
+;;
+;; Description:
+;;
+;; Author:      William Hawkins, Synergex Professional Services Group
+;;
+;; Copyright    © 2010 Synergex International Corporation.  All rights reserved.
+;;
+;; WARNING:     All content constituting or related to this code ("Code") is the
+;;              property of Synergex International Corporation ("Synergex") and
+;;              is protected by U.S. and international copyright laws.
+;;              If you were given this Code by a Synergex employee then you may
+;;              use and modify it freely for use within your applications.
+;;
+;;              However, you may use the Code only for your personal use.
+;;              Any other use, unless otherwise authorized in writing by
+;;              Synergex is strictly prohibited.  You may not under any
+;;              circumstances distribute this Code, or any modified version
+;;              or part of this Code, to any third party without first
+;;              obtaining written permission to do so from Synergex.
+;;              In using this Code you accept that it is provided as is,
+;;              and without support or warranty of any kind.
+;;
+;;              Neither Synergex nor the author accept any responsibility
+;;              for any losses or damages of any nature which may arise
+;;              from the use of this Code.  This header information must
+;;              remain unaltered in the Code at all times.  Possession
+;;              of this Code, or any modified version or part of this Code,
+;;              indicates your acceptance of these terms.
+;;
+;;***********************************************************************************
+;; convert Synergy compiler command line to DIBOL equivalent command line
+
+import System.Collections
+import SynPSG.Core.Utilities
+
+namespace SynPSG.Core.Utilities
+
+    function dbl2dibol  ,a
+        req in  dblCommand  ,a
+        endparams
+
+        record
+            dibolCommand    ,a1000
+            dblLength       ,int
+            dblPos          ,int
+            delim           ,a1
+            paramArray      ,@System.Collections.ArrayList
+            token           ,string
+        endrecord
+    proc
+
+        if(%option(34)) then
+            delim = '/'
+        else
+            delim = '-'
+
+        dblLength = %trim(dblCommand)
+        dblPos = 5
+
+        call skipSpaces
+
+        ;no compiler options
+        if(dblCommand(dblPos:1) != delim) then
+            dibolCommand = 'DIBOL ' + dblCommand(dblPos, dblLength)
+        else
+        begin
+            dibolCommand = 'DIBOL'
+
+            paramArray = new System.Collections.ArrayList()
+
+            while(dblPos < dblLength)
+            begin
+                using dblCommand(dblPos:1) select
+                (delim),
+                begin
+                    ;;spit out any unprocessed options.  This may cause compile errors
+                    while(paramArray.Count > 0)
+                    begin
+                        token = (string)paramArray[0]
+                        dibolCommand = dibolCommand(1:%trim(dibolCommand)) + token
+                        call pop_paramArray
+                    end
+                    call processOption
+                end
+                (' '),
+                begin
+                    call skipSpaces
+                    if(dblCommand(dblPos:1) != delim)
+                        call processNextToken
+                end
+                (),
+                    dblPos += 1
+                endusing
+            end
+
+            clear paramArray
+        end
+
+
+        freturn dibolCommand(1:%trim(dibolCommand))
+
+;----------------------------------------------------------------------------
+; process one "-" token (can be more than one compiler option)
+
+    processOption,
+
+        while(dblPos < dblLength)
+        begin
+            dblPos += 1
+            using dblCommand(dblPos:1) select
+            (' '),
+                exitloop
+            (delim),
+            begin
+                ;; no more options
+                dblPos += 1
+                call skipSpaces
+                dibolCommand = dibolCommand(1:%trim(dibolCommand)) + ' ' + dblCommand(dblPos,dblLength)
+                dblPos = dblLength + 1
+                exitloop
+            end
+            ('q'),
+            begin
+                data qlen   ,int
+                qlen = (%instr(dblPos, dblCommand, ' ') - dblPos) + 1
+                using dblCommand(dblPos:qlen) select
+                ('qalign '),
+                    dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/ALIGN'
+                ('qaltif '),
+                    dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/ALTIF'
+                ('qnoaltif '),
+                    dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/NOALTIF'
+                ('qaltstore '),
+                    dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/ALTSTORE'
+                ('qnoaltstore '),
+                    dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/NOALTSTORE'
+                ('qcheck '),
+                    dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/CHECK=BOUNDS'
+                ('qnocheck '),
+                    dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/CHECK=NOBOUNDS'
+                ('qdecscope '),
+                    dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/DECSCOPE'
+                ('qnodecscope '),
+                    dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/NODECSCOPE'
+                ('qdebug '),
+                    dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/DEBUG'
+                ('qdebug='),
+                begin
+                    if(qlen >= 7) then
+                        dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/DEBUG=' + dblCommand(dblPos+7,dblPos+qlen-1)
+                    else
+                        dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/DEBUG'
+                end
+                ('qnodebug '),
+                    dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/NODEBUG'
+                ('qerrwarn '),
+                    dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/ERRWARN'
+                ('qexpand '),
+                    dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/EXPAND'
+                ('qexternal '),
+                    dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/COMMON=EXTERNAL'
+                ('qglobal '),
+                    dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/COMMON=GLOBAL'
+                ('qimpdir='),
+                begin
+                    dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/IMPDIR="'
+                    dblpos += 8
+                    qlen = %instr(dblPos, dblCommand, delim)
+                    ;; no more delimiters, so assume only one folder
+                    if(qlen == 0) then
+                        qlen = %EndOfToken(dblCommand, dblPos)
+                    else
+                        do qlen -= 1 until(dblCommand(qlen:1) != ' ')
+                    ;;replace space with comma's, and remove quotes (assumes no double spacing)
+                    dibolCommand = dibolCommand(1:%trim(dibolCommand)) + %stringReplace(%stringReplace(dblCommand(dblPos,qlen),' ',','),'"',^null) + '"'
+                    qlen -= dblPos
+                end
+                ('qimplicit_functions '),
+                    dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/IMPLICIT'
+                ('qlocal '),
+                    dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/LOCAL'
+                ('qnet '),
+                    dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/NET'
+                ('qnoargnopt '),
+                    dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/NOARGNOPT'
+                ('qnoobject '),
+                    dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/NOOBJECT'
+                ('qoptimize '),
+                    dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/OPTIMIZE'
+                ('qoptimize='),
+                begin
+                    if(qlen >= 11) then
+                        dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/OPTIMIZE=' + dblCommand(dblPos+10,dblPos+qlen-1)
+                    else
+                        dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/OPTIMIZE'
+                end
+                ('qnooptimize '),
+                    dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/NOOPTIMIZE'
+                ('qprofile '),
+                    dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/PROFILE'
+                ('qnoprofile '),
+                    dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/NOPROFILE'
+                ('qreentrant '),
+                    dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/REENTRANT'
+                ('qnoreentrant '),
+                    dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/NOREENTRANT'
+                ('qrefresh '),
+                    dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/REFRESH'
+                ('qnorefresh '),
+                    dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/NOREFRESH'
+                ('qstack '),
+                    dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/STACK'
+                ('qstatic '),
+                    dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/STATIC'
+                ('qstrict '),
+                    dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/STRICT'
+                ('qsuffix '),
+                    dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/SUFFIX'
+                ('qnosuffix '),
+                    dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/NOSUFFIX'
+                ('qvar_review '),
+                    dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/VAR_REVIEW'
+                ('qvar_review='),
+                begin
+                    if(qlen >= 13) then
+                        dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/VAR_REVIEW=' + dblCommand(dblPos+12,dblPos+qlen-1)
+                    else
+                        dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/VAR_REVIEW'
+                end
+                ('qreview_level='),
+                begin
+                    if(qlen >= 15)
+                        dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/REVIEW_LEVEL=' + dblCommand(dblPos+14,dblPos+qlen-1)
+                end
+                ('qvariant='),
+                begin
+                    if(qlen >= 10)
+                        dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/VARIANT=' + dblCommand(dblPos+9,dblPos+qlen-1)
+                end
+                ('qrelaxed '),
+                    dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/RELAXED'
+                ('qrelaxed:'),
+                begin
+                    dblpos += 9
+                    qlen = %EndOfToken(dblCommand, dblPos)
+                    dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/RELAXED=(' + %stringReplace(dblCommand(dblPos, qlen), ':', ',') + ')'
+                    qlen -= dblPos
+                end
+                (),
+                    call unknownOption
+                endusing
+                dblPos += (qlen-1)
+                exitloop
+            end
+
+            ('A'),
+                dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/COMMON=NOSUFFIX'
+            ('B'),
+                dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/CHECK=BOUNDS'
+            ('C'),
+                dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/SHOW=NOCONDITIONALS'
+            ('E'),
+                dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/REENTRANT'
+            ('F'),
+                dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/FIND_LOCK'
+            ('G'),
+                dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/COMMON=GLOBAL'
+            ('L'),
+            begin
+                token = '/PAGE_SIZE='
+                call addToken
+            end
+            ('P'),
+                dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/SHOW=NEWPAGE'
+            ('T'),
+                dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/TRIM'
+            ('V'),
+                dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/ALTSTORE'
+            ('W'),
+            begin
+                if(dblCommand(dblPos:3) == 'WD=') then
+                begin
+                    data tlen   ,int
+                    dblPos += 3
+                    tlen = %EndOfToken(dblCommand, dblPos)
+                    dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/DISWARN=(' + dblCommand(dblPos, tlen) + ')'
+                    dblPos = tlen
+                end
+                else
+                begin
+                    using dblCommand(dblPos+1:1) select
+                    ('0'),
+                    begin
+                        dblPos += 1
+                        dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/NOWARNINGS'
+                    end
+                    ('1' thru '4'),
+                    begin
+                        dblPos += 1
+                        dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/WARNINGS=' + dblCommand(dblPos:1)
+                    end
+                    (),
+                        dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/WARNINGS=3'
+                    endusing
+                end
+            end
+            ('X'),
+                dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/IMPLICIT'
+
+            ('a'),
+                dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/ALTIF'
+            ('b'),
+            begin
+                token = '/BIND=SECONDARY'
+                call addToken
+            end
+            ('c'),
+                dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/COMMON=EXTERNAL'
+            ('d'),
+                dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/DEBUG'
+            ('f'),
+                dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/SHOW=NEWPAGE'
+            ('g'),
+                dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/NOGBLDEFS'
+            ('h'),
+                dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/SHOW=NOHEADERS'
+            ('i'),
+                dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/OFFSETS'
+            ('l'),
+            begin
+                token = '/LISTING='
+                call addToken
+            end
+            ('o'),
+            begin
+                token = '/OBJECT='
+                call addToken
+            end
+            ('n'),
+                dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/NOOBJECT'
+            ('r'),
+                dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/REFRESH'
+            ('s'),
+                dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/DECSCOPE'
+            ('t'),
+                nop
+            ('p'),
+            begin
+                token = '/BIND=PRIMARY'
+                call addToken
+            end
+            ('u'),
+                dibolCommand = dibolCommand(1:%trim(dibolCommand)) + '/PROFILE'
+            ('v'),
+            begin
+                token = '/VARIANT='
+                call addToken
+            end
+            ('w'),
+            begin
+                token = '/WIDTH_SIZE='
+                call addToken
+            end
+            (),
+                call unknownOption
+            endusing
+        end
+
+        return
+
+;----------------------------------------------------------------------------
+
+    unknownOption,
+
+        ;add processing logic for bad DBL options
+
+        return
+
+;----------------------------------------------------------------------------
+
+    processNextToken,
+        if(paramArray.Count > 0) then
+        begin
+            data spos ,int
+            data epos ,int
+            data pos ,int
+
+            token = (string)paramArray[0]
+
+            dibolCommand = dibolCommand(1:%trim(dibolCommand)) + token
+
+            pos = %EndOfToken(dblCommand, dblPos)
+            if(dblCommand(dblPos:1) == '"' && dblCommand(pos:1) = '"' && pos-dblPos > 1) then
+            begin
+                spos = dblPos+1
+                epos = pos - 1
+            end
+            else
+            begin
+                spos = dblPos
+                epos = pos
+            end
+
+            using TRUE select
+            (token.EndsWith('=')),
+                dibolCommand = dibolCommand(1:%trim(dibolCommand)) + dblCommand(spos,epos)
+            (token.EndsWith('="')),
+                dibolCommand = dibolCommand(1:%trim(dibolCommand)) + dblCommand(spos,epos) + '"'
+            endusing
+
+            dblPos = pos
+
+            call pop_paramArray
+        end
+        else
+        begin
+            dibolCommand = dibolCommand(1:%trim(dibolCommand)) + ' ' + dblCommand(dblPos,dblLength)
+            dblPos = dblLength + 1
+        end
+        return
+
+;----------------------------------------------------------------------------
+;push paramArray
+
+    addToken,
+        paramArray.Add(token)
+        return
+
+;----------------------------------------------------------------------------
+;pop paramArray
+
+    pop_paramArray,
+        if(paramArray.Count > 0)
+        paramArray.RemoveAt(0)
+        return
+
+;----------------------------------------------------------------------------
+
+    skipSpaces,
+        while(dblPos < dblLength && dblCommand(dblPos:1) == ' ')
+        dblPos += 1
+        return
+
+    endfunction
+
+;++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+endnamespace
+
